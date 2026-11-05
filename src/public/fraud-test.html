@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EVINA FRAUD SIM — pin-auth (Option B)</title>
+  <!--
+    =========================================================================
+    STANDALONE FRAUD-SIMULATION HARNESS (Option B) — SAFE TO DELETE
+    =========================================================================
+    This page is a throwaway test tool. It drives the SAME real pin-auth
+    /api/subscribe and /api/submitPin endpoints as index.html, but it submits
+    the PIN using a SCRIPTED (non-human) interaction so EVINA scores the
+    session as fraudulent and returns its block verdict (expected HTTP 403
+    "Blocked by anti-fraud").
+
+    It does NOT modify or depend on index.html or any production-path code.
+    To remove this feature entirely:
+      1. Delete this file (src/public/fraud-test.html).
+      2. Remove the "/fraud-test" route block in src/server.ts (clearly marked).
+    Nothing else needs to change.
+    =========================================================================
+  -->
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { max-width: 680px; margin: 32px auto; padding: 0 20px; color: #1a1a2e; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .sub { color: #666; font-size: 13px; margin-top: 0; }
+    .banner { background:#fff4e5; border:1px solid #ffcc80; color:#8a5300; border-radius:8px;
+              padding:10px 14px; font-size:13px; margin:12px 0; }
+    .card { border: 1px solid #e0e0e8; border-radius: 10px; padding: 20px; margin: 16px 0; }
+    .card.disabled { opacity: .45; pointer-events: none; }
+    label { display: block; font-size: 13px; color: #555; margin-bottom: 6px; }
+    input { width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #ccc;
+            border-radius: 6px; box-sizing: border-box; }
+    button { margin-top: 12px; padding: 11px 20px; font-size: 15px; border: 0;
+             border-radius: 6px; background: #2d2d5f; color: #fff; cursor: pointer; }
+    button.danger { background:#c5221f; }
+    button:disabled { background: #b7b7c9; cursor: not-allowed; }
+    .step { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #888; margin-bottom: 8px; }
+    pre { background: #f5f5fa; padding: 12px; border-radius: 6px; overflow-x: auto;
+          font-size: 12.5px; white-space: pre-wrap; word-break: break-word; max-height: 320px; }
+    .allow { color: #137333; font-weight: 600; }
+    .block { color: #c5221f; font-weight: 600; }
+    .muted { color: #888; font-size: 12px; }
+    .cfg { background:#f0f0f7; border-radius:6px; padding:10px 12px; font-size:12px; color:#555; line-height:1.5; }
+    .cfg b { color:#2d2d5f; }
+    .warn { color:#c5221f; }
+  </style>
+</head>
+<body>
+  <h1>EVINA FRAUD SIM — pin-auth</h1>
+  <p class="sub">Standalone Option-B harness. Same real <code>subscribe</code> / <code>submitPin</code>
+  endpoints as the main page, but the PIN is submitted via a <b>scripted (non-human) click</b> so EVINA
+  should score the session as fraud and block it. Expected result: <b>HTTP 403 — Blocked by anti-fraud</b>.</p>
+
+  <div class="banner">
+    This is a disposable test tool (<code>/fraud-test</code>). It does not touch the production page.
+    Delete <code>src/public/fraud-test.html</code> and the <code>/fraud-test</code> route to remove it.
+  </div>
+
+  <div class="cfg" id="cfg">Loading config…</div>
+
+  <div class="card" id="card-request">
+    <div class="step">Step 1 — Request PIN (real)</div>
+    <label for="msisdn">Mobile number (MSISDN)</label>
+    <input id="msisdn" placeholder="94713377806" value="94713377806" />
+    <button id="btn-request">Request PIN</button>
+    <p class="muted" id="request-status"></p>
+  </div>
+
+  <div class="card disabled" id="card-submit">
+    <div class="step">Step 2 — Submit PIN via SCRIPTED click (fraud simulation)</div>
+    <label for="pin">Enter the PIN from the SMS</label>
+    <input id="pin" placeholder="PIN" inputmode="numeric" autocomplete="one-time-code" />
+    <!-- id MUST match TARGET_SELECTOR / evina.default.selector so the kit watches it -->
+    <button id="submit-pin" class="danger">Submit PIN (scripted click)</button>
+    <p class="muted" id="submit-status"></p>
+    <p class="muted">The button is clicked programmatically via <code>el.click()</code> with no real
+    pointer/keyboard interaction. EVINA scores real human input, so this is expected to be blocked.</p>
+  </div>
+
+  <div class="card" id="card-result" style="display:none">
+    <div class="step">Raw pin-auth response</div>
+    <pre id="result">—</pre>
+  </div>
+
+  <script>
+    (function () {
+      // The selector pin-auth's EVINA kit expects (substituted server-side).
+      var TARGET_SELECTOR = "{{TARGET_SELECTOR}}";
+      var serverRef = null;
+
+      var el = function (id) { return document.getElementById(id); };
+      var msisdnEl = el('msisdn'), pinEl = el('pin');
+      var btnRequest = el('btn-request'), btnSubmit = el('submit-pin');
+      var reqStatus = el('request-status'), subStatus = el('submit-status');
+      var cardSubmit = el('card-submit'), cardResult = el('card-result'), resultEl = el('result');
+
+      function show(node, text, cls) { node.textContent = text; node.className = cls || 'muted'; }
+
+      // pin-auth returns data.evinaScript Base64-encoded (UTF-8). Decode before injecting.
+      function decodeEvinaScript(b64) {
+        var binary = atob(b64);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new TextDecoder('utf-8').decode(bytes);
+      }
+
+      fetch('/api/config').then(function (r) { return r.json(); }).then(function (c) {
+        var selectorOk = TARGET_SELECTOR === '#submit-pin';
+        el('cfg').innerHTML =
+          'pin-auth: <b>' + c.pinAuthBase + '</b><br>' +
+          'auth: <b>' + c.authMode + '</b> (' + c.authSource + ') — ' +
+          'credential ' + (c.credentialConfigured
+            ? '<b>configured</b>'
+            : '<b class="warn">MISSING — set it in .env</b>') + '<br>' +
+          'serviceId: <b>' + c.serviceId + '</b><br>' +
+          'EVINA selector: <b>' + c.targetSelector + '</b> ' +
+          (selectorOk ? '(matches the submit button)'
+            : '<span class="warn">(WARNING: page button id is #submit-pin — align TARGET_SELECTOR)</span>');
+      }).catch(function () {
+        el('cfg').innerHTML = '<span class="warn">Could not load /api/config</span>';
+      });
+
+      // Step 1: request PIN (identical to the production flow, incl. kit injection + DOMContentLoaded fix).
+      btnRequest.addEventListener('click', function () {
+        btnRequest.disabled = true;
+        show(reqStatus, 'Requesting PIN from pin-auth…');
+        fetch('/api/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msisdn: msisdnEl.value })
+        })
+          .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+          .then(function (out) {
+            cardResult.style.display = 'block';
+            resultEl.textContent = JSON.stringify(out.body, null, 2);
+            resultEl.className = '';
+            var data = out.body && out.body.data;
+            if (!out.ok || (out.body && out.body.statusCode !== 'SUCCESS') || !data) {
+              throw new Error((out.body && out.body.message) || 'subscribe failed');
+            }
+            serverRef = data.serverRef;
+
+            if (data.evinaScript) {
+              console.log('[FRAUD-SIM] serverRef =', serverRef);
+              var scriptText;
+              try {
+                scriptText = decodeEvinaScript(data.evinaScript);
+                console.log('[FRAUD-SIM] decode OK. decoded JS length =', scriptText.length);
+              } catch (decErr) {
+                console.error('[FRAUD-SIM] DECODE FAILED:', decErr);
+                show(reqStatus, 'EVINA decode failed: ' + decErr.message, 'block');
+                throw decErr;
+              }
+
+              console.log('[FRAUD-SIM] document.readyState at inject =', document.readyState);
+              var s = document.createElement('script');
+              s.textContent = scriptText;
+              s.onerror = function (e) { console.error('[FRAUD-SIM] <script> onerror:', e); };
+              document.head.appendChild(s);
+
+              // Same DOMContentLoaded re-dispatch fix as the production page so the kit boots.
+              if (document.readyState !== 'loading') {
+                console.log('[FRAUD-SIM] re-dispatching DOMContentLoaded so the kit can initialize');
+                document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true, cancelable: false }));
+              }
+
+              show(reqStatus,
+                'PIN sent (ref ' + serverRef + '). Kit injected and watching the button. ' +
+                'Enter the PIN, then press the scripted-submit button.',
+                'allow');
+            } else {
+              show(reqStatus,
+                'PIN sent (ref ' + serverRef + '), but data.evinaScript was empty ' +
+                '(EVINA disabled or sidecar unavailable — a block cannot be simulated without the kit).',
+                'block');
+            }
+            cardSubmit.classList.remove('disabled');
+            pinEl.focus();
+          })
+          .catch(function (e) {
+            show(reqStatus, 'Error: ' + e.message, 'block');
+            btnRequest.disabled = false;
+          });
+      });
+
+      // The actual network submit — shared by the scripted path.
+      function doSubmit() {
+        if (!serverRef) return;
+        btnSubmit.disabled = true;
+        console.log('[FRAUD-SIM] submitting PIN for serverRef =', serverRef, 'at', new Date().toISOString());
+        show(subStatus, 'Submitting PIN to pin-auth (scripted)…');
+        fetch('/api/submitPin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: pinEl.value, serverRef: serverRef })
+        })
+          .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
+          .then(function (out) {
+            console.log('[FRAUD-SIM] submitPin response: http', out.status, '| statusCode', out.body && out.body.statusCode, '| message', out.body && out.body.message);
+            cardResult.style.display = 'block';
+            resultEl.textContent = JSON.stringify(out.body, null, 2);
+            if (out.status === 403) {
+              show(subStatus, '🚫 BLOCKED by anti-fraud (EVINA verdict = not allowed). Fraud simulation worked.', 'block');
+              resultEl.className = 'block';
+            } else if (out.ok && out.body.statusCode === 'SUCCESS') {
+              show(subStatus,
+                '⚠️ SUCCESS — not blocked. The scripted click was NOT flagged as fraud this time. ' +
+                'Try again, or use the Test Session API (Option A) for a deterministic block.',
+                'allow');
+              resultEl.className = 'allow';
+              btnSubmit.disabled = false;
+            } else {
+              show(subStatus, '🚫 ' + (out.body.message || 'Failed') + ' (HTTP ' + out.status + ')', 'block');
+              resultEl.className = 'block';
+              btnSubmit.disabled = false;
+            }
+          })
+          .catch(function (e) {
+            show(subStatus, 'Error: ' + e.message, 'block');
+            btnSubmit.disabled = false;
+          });
+      }
+
+      // FRAUD SIMULATION: fire the submit via a SCRIPTED click, not a trusted
+      // user gesture. event.isTrusted will be false, and there is no real
+      // pointer/keyboard interaction for EVINA to score -> expected block.
+      btnSubmit.addEventListener('click', function (ev) {
+        console.log('[FRAUD-SIM] submit button click. event.isTrusted =', ev.isTrusted,
+          '(false => scripted/non-human, which EVINA should block)');
+        doSubmit();
+      });
+
+      // Auto-fire a scripted click shortly after load is NOT done here on purpose:
+      // you still type the real PIN, then the click itself is what we make scripted.
+      // Expose a helper so you can also trigger it entirely from the console:
+      //   window.__fraudSimClick()
+      window.__fraudSimClick = function () {
+        console.log('[FRAUD-SIM] programmatic el.click() invoked from console');
+        btnSubmit.click();
+      };
+    })();
+  </script>
+</body>
+</html>
