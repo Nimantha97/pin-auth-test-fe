@@ -1,0 +1,13 @@
+[build]
+  command = "node scripts/build-netlify.mjs"
+  publish = "netlify-dist"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# Optional test page (same URL as the Express server used)
+[[redirects]]
+  from = "/fraud-test"
+  to = "/fraud-test.html"
+  status = 200

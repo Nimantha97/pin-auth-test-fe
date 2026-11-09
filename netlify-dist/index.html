@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EVINA live test — pin-auth</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { max-width: 640px; margin: 32px auto; padding: 0 20px; color: #1a1a2e; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .sub { color: #666; font-size: 13px; margin-top: 0; }
+    .card { border: 1px solid #e0e0e8; border-radius: 10px; padding: 20px; margin: 16px 0; }
+    .card.disabled { opacity: .45; pointer-events: none; }
+    label { display: block; font-size: 13px; color: #555; margin-bottom: 6px; }
+    input { width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #ccc;
+            border-radius: 6px; box-sizing: border-box; }
+    button { margin-top: 12px; padding: 11px 20px; font-size: 15px; border: 0;
+             border-radius: 6px; background: #2d2d5f; color: #fff; cursor: pointer; }
+    button:disabled { background: #b7b7c9; cursor: not-allowed; }
+    .step { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #888; margin-bottom: 8px; }
+    pre { background: #f5f5fa; padding: 12px; border-radius: 6px; overflow-x: auto;
+          font-size: 12.5px; white-space: pre-wrap; word-break: break-word; max-height: 320px; }
+    .allow { color: #137333; font-weight: 600; }
+    .block { color: #c5221f; font-weight: 600; }
+    .muted { color: #888; font-size: 12px; }
+    .cfg { background:#f0f0f7; border-radius:6px; padding:10px 12px; font-size:12px; color:#555; line-height:1.5; }
+    .cfg b { color:#2d2d5f; }
+    .warn { color:#c5221f; }
+    .tools { font-size:12px; margin-top:8px; }
+    .tools a { color:#2d2d5f; }
+  </style>
+</head>
+<body>
+  <h1>EVINA live test — pin-auth</h1>
+  <p class="sub">Drives the real pin-auth <code>subscribe</code> / <code>submitPin</code> v2 endpoints
+  through a server-side proxy. pin-auth calls the EVINA sidecar internally and returns the EVINA kit
+  Base64-encoded in <code>data.evinaScript</code>; this page decodes it before injecting. This
+  exercises the full production path.</p>
+
+  <div class="cfg" id="cfg">Loading config…</div>
+  <div class="tools"><a href="/diag" target="_blank" rel="noopener">Run reachability diagnostic (/diag)</a></div>
+
+  <div class="card" id="card-request">
+    <div class="step">Step 1 — Request PIN</div>
+    <label for="msisdn">Mobile number (MSISDN)</label>
+    <input id="msisdn" placeholder="94713377806" value="94713377806" />
+    <button id="btn-request">Request PIN</button>
+    <p class="muted" id="request-status"></p>
+  </div>
+
+  <div class="card disabled" id="card-submit">
+    <div class="step">Step 2 — Submit PIN</div>
+    <label for="pin">Enter the PIN from the SMS</label>
+    <input id="pin" placeholder="PIN" inputmode="numeric" autocomplete="one-time-code" />
+    <!-- id MUST match TARGET_SELECTOR / evina.default.selector so the kit watches it -->
+    <button id="submit-pin">Submit PIN</button>
+    <p class="muted" id="submit-status"></p>
+  </div>
+
+  <div class="card" id="card-result" style="display:none">
+    <div class="step">Raw pin-auth response</div>
+    <pre id="result">—</pre>
+  </div>
+
+  <script>
+    (function () {
+      // The selector pin-auth's EVINA kit expects (substituted server-side).
+      var TARGET_SELECTOR = "#submit-pin";
+      var serverRef = null;
+
+      var el = function (id) { return document.getElementById(id); };
+      var msisdnEl = el('msisdn'), pinEl = el('pin');
+      var btnRequest = el('btn-request'), btnSubmit = el('submit-pin');
+      var reqStatus = el('request-status'), subStatus = el('submit-status');
+      var cardSubmit = el('card-submit'), cardResult = el('card-result'), resultEl = el('result');
+
+      function show(node, text, cls) { node.textContent = text; node.className = cls || 'muted'; }
+
+      // pin-auth returns data.evinaScript Base64-encoded (UTF-8) for transport integrity.
+      // This reverses it to the raw EVINA JS kit. UTF-8 aware so non-ASCII chars survive.
+      function decodeEvinaScript(b64) {
+        var binary = atob(b64);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new TextDecoder('utf-8').decode(bytes);
+      }
+
+      // Show what the proxy points at, and warn on obvious misconfig.
+      fetch('/api/config').then(function (r) { return r.json(); }).then(function (c) {
+        var selectorOk = TARGET_SELECTOR === '#submit-pin';
+        el('cfg').innerHTML =
+          'pin-auth: <b>' + c.pinAuthBase + '</b><br>' +
+          'auth: <b>' + c.authMode + '</b> (' + c.authSource + ') — ' +
+          'credential ' + (c.credentialConfigured
+            ? '<b>configured</b>'
+            : '<b class="warn">MISSING — set it in .env</b>') + '<br>' +
+          'serviceId: <b>' + c.serviceId + '</b><br>' +
+          'EVINA selector: <b>' + c.targetSelector + '</b> ' +
+          (selectorOk ? '(matches the submit button)'
+            : '<span class="warn">(WARNING: page button id is #submit-pin — align TARGET_SELECTOR)</span>');
+      }).catch(function () {
+        el('cfg').innerHTML = '<span class="warn">Could not load /api/config</span>';
+      });
+
+      // Step 1: request PIN via proxy → pin-auth subscribe → sidecar request-script.
+      btnRequest.addEventListener('click', function () {
+        btnRequest.disabled = true;
+        show(reqStatus, 'Requesting PIN from pin-auth…');
+        fetch('/api/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msisdn: msisdnEl.value })
+        })
+          .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+          .then(function (out) {
+            cardResult.style.display = 'block';
+            resultEl.textContent = JSON.stringify(out.body, null, 2);
+            resultEl.className = '';
+            var data = out.body && out.body.data;
+            if (!out.ok || (out.body && out.body.statusCode !== 'SUCCESS') || !data) {
+              throw new Error((out.body && out.body.message) || 'subscribe failed');
+            }
+            serverRef = data.serverRef;
+
+            if (data.evinaScript) {
+              // data.evinaScript is Base64-encoded (UTF-8) by pin-auth for transport safety.
+              // Decode it back to raw JS before injecting, otherwise nothing runs.
+              console.log('[EVINA] serverRef =', serverRef);
+              console.log('[EVINA] base64 length =', data.evinaScript.length);
+              console.log('[EVINA] base64 first 80 chars =', data.evinaScript.slice(0, 80));
+
+              var scriptText;
+              try {
+                scriptText = decodeEvinaScript(data.evinaScript);
+                console.log('[EVINA] decode OK. decoded JS length =', scriptText.length);
+                console.log('[EVINA] decoded JS first 120 chars =', scriptText.slice(0, 120));
+                console.log('[EVINA] decoded JS last 60 chars =', scriptText.slice(-60));
+              } catch (decErr) {
+                console.error('[EVINA] DECODE FAILED:', decErr);
+                show(reqStatus, 'EVINA decode failed: ' + decErr.message, 'block');
+                throw decErr;
+              }
+
+              // Capture window errors that fire while the kit initializes.
+              window.addEventListener('error', function (ev) {
+                console.error('[EVINA] window error after inject:', ev.message, ev.filename, ev.lineno + ':' + ev.colno);
+              });
+
+              // EVINA's DCBprotect kit initializes off the DOMContentLoaded event. Since we
+              // inject it inside a click handler, DOMContentLoaded has ALREADY fired by now,
+              // so the kit's listener would never run -> ft code 2801 / 2804.
+              // Log the current state so we can confirm this, then re-dispatch the event
+              // after injection so the kit bootstraps correctly.
+              console.log('[EVINA] document.readyState at inject =', document.readyState,
+                '(if "interactive"/"complete", DOMContentLoaded already fired)');
+
+              var s = document.createElement('script');
+              s.textContent = scriptText;
+              s.onerror = function (e) { console.error('[EVINA] <script> onerror:', e); };
+              document.head.appendChild(s);
+              console.log('[EVINA] <script> appended to <head>. Checking for EVINA globals in 1s…');
+
+              // The kit registered a DOMContentLoaded listener, but that event already fired
+              // before this click. Re-dispatch it so the kit initializes instead of returning
+              // 2801 / 2804. Safe no-op if the document is somehow still loading.
+              if (document.readyState !== 'loading') {
+                console.log('[EVINA] re-dispatching DOMContentLoaded so the kit can initialize');
+                document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true, cancelable: false }));
+              }
+
+              // Give the kit a tick to initialize, then report what globals it exposed.
+              setTimeout(function () {
+                var globals = Object.keys(window).filter(function (k) {
+                  return /evina|dcb|protect|fraud/i.test(k);
+                });
+                console.log('[EVINA] EVINA-related window globals after 1s =', globals);
+                console.log('[EVINA] target element present (' + TARGET_SELECTOR + ') =',
+                  !!document.querySelector(TARGET_SELECTOR));
+              }, 1000);
+
+              show(reqStatus,
+                'PIN sent (ref ' + serverRef + '). EVINA kit decoded, injected and watching the submit button. Enter the PIN.',
+                'allow');
+            } else {
+              show(reqStatus,
+                'PIN sent (ref ' + serverRef + '), but data.evinaScript was empty ' +
+                '(EVINA disabled or sidecar unavailable — submit will fail-open).',
+                'block');
+            }
+            cardSubmit.classList.remove('disabled');
+            pinEl.focus();
+          })
+          .catch(function (e) {
+            show(reqStatus, 'Error: ' + e.message, 'block');
+            btnRequest.disabled = false;
+          });
+      });
+
+      // Step 2: submit PIN → proxy → pin-auth submitPin → sidecar verify.
+      btnSubmit.addEventListener('click', function () {
+        if (!serverRef) return;
+        btnSubmit.disabled = true;
+        console.log('[EVINA] submitting PIN for serverRef =', serverRef, 'at', new Date().toISOString());
+        show(subStatus, 'Submitting PIN to pin-auth…');
+        fetch('/api/submitPin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: pinEl.value, serverRef: serverRef })
+        })
+          .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
+          .then(function (out) {
+            console.log('[EVINA] submitPin response: http', out.status, '| statusCode', out.body && out.body.statusCode, '| message', out.body && out.body.message);
+            cardResult.style.display = 'block';
+            resultEl.textContent = JSON.stringify(out.body, null, 2);
+            if (out.ok && out.body.statusCode === 'SUCCESS') {
+              show(subStatus, '✅ SUCCESS — PIN correct and EVINA allowed.', 'allow');
+              resultEl.className = 'allow';
+            } else if (out.status === 403) {
+              show(subStatus, '🚫 Blocked by anti-fraud (EVINA verdict = not allowed).', 'block');
+              resultEl.className = 'block';
+              btnSubmit.disabled = false;
+            } else {
+              show(subStatus, '🚫 ' + (out.body.message || 'Failed'), 'block');
+              resultEl.className = 'block';
+              btnSubmit.disabled = false;
+            }
+          })
+          .catch(function (e) {
+            show(subStatus, 'Error: ' + e.message, 'block');
+            btnSubmit.disabled = false;
+          });
+      });
+    })();
+  </script>
+</body>
+</html>
