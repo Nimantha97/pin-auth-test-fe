@@ -12,7 +12,8 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { log, setLogLevel } from "./logger.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// Not named `__dirname`: Netlify's ESM bundler injects its own `__dirname` shim.
+const configDir = dirname(fileURLToPath(import.meta.url));
 
 /** Minimal .env loader — no external dependency. Does not override real env vars. */
 function loadDotEnv(path: string): void {
@@ -36,7 +37,7 @@ function loadDotEnv(path: string): void {
   }
 }
 
-loadDotEnv(resolve(__dirname, "../.env"));
+loadDotEnv(resolve(configDir, "../.env"));
 
 export type AuthMode = "jwt-assertion" | "bearer";
 
