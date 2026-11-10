@@ -30,14 +30,47 @@ export interface ClientInfo {
   url?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Bearer token auto-refresh (only used when AUTH_MODE=bearer and
+// CONSUMER_KEY + CONSUMER_SECRET are set instead of a static BEARER_TOKEN)
+// ---------------------------------------------------------------------------
+let cachedToken: { value: string; expiresAt: number } | null = null;
+
+async function fetchBearerToken(): Promise<string> {
+  const now = Date.now();
+  if (cachedToken && now < cachedToken.expiresAt) return cachedToken.value;
+
+  const credentials = Buffer.from(`${config.consumerKey}:${config.consumerSecret}`).toString("base64");
+  const resp = await fetch(config.tokenUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": "Basic " + credentials,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials",
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Token endpoint returned HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+
+  const json = (await resp.json()) as { access_token: string; expires_in?: number };
+  const expiresIn = (json.expires_in ?? 3600) - 60; // refresh 60 s before expiry
+  cachedToken = { value: json.access_token, expiresAt: now + expiresIn * 1000 };
+  log.info("Bearer token refreshed", { expiresInSec: expiresIn });
+  return cachedToken.value;
+}
+
 /** Build the auth headers for the configured mode. */
-function authHeaders(): Record<string, string> {
+async function authHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
   if (config.authMode === "bearer") {
-    if (config.bearerToken) headers["Authorization"] = "Bearer " + config.bearerToken;
+    const token = config.bearerToken || await fetchBearerToken();
+    if (token) headers["Authorization"] = "Bearer " + token;
   } else {
     if (config.jwtAssertion) headers["X-JWT-Assertion"] = config.jwtAssertion;
   }
@@ -58,7 +91,7 @@ applyTlsSetting();
 
 /** Low-level JSON POST to pin-auth with logging + timing. */
 async function postJson(url: string, payload: unknown, cid: string): Promise<PinAuthResult> {
-  const headers = authHeaders();
+  const headers = await authHeaders();
   const started = Date.now();
 
   log.info("→ pin-auth request", { url, payload }, cid);
@@ -181,7 +214,7 @@ export async function diagnose(): Promise<{ reachable: boolean; detail: unknown 
   try {
     const resp = await fetch(config.subscribeUrl, {
       method: "POST",
-      headers: authHeaders(),
+      headers: await authHeaders(),
       body: JSON.stringify({ msisdn: "" }),
     });
     const text = await resp.text();

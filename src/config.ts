@@ -90,6 +90,9 @@ export interface AppConfig {
   /** The resolved X-JWT-Assertion value (built or pasted), or "" if not applicable. */
   jwtAssertion: string;
   bearerToken: string;
+  consumerKey: string;
+  consumerSecret: string;
+  tokenUrl: string;
   serviceId: string;
   language: string;
   targetSelector: string;
@@ -111,6 +114,9 @@ function buildConfig(): AppConfig {
   const appId = env("PIN_AUTH_APP_ID");
   const jwtOverride = env("PIN_AUTH_JWT");
   const bearerToken = env("BEARER_TOKEN");
+  const consumerKey = env("CONSUMER_KEY");
+  const consumerSecret = env("CONSUMER_SECRET");
+  const tokenUrl = env("TOKEN_URL", "https://ideabiz.lk/apicall/token");
 
   let jwtAssertion = "";
   let authSource = "none";
@@ -124,7 +130,9 @@ function buildConfig(): AppConfig {
       authSource = "built from PIN_AUTH_APP_ID=" + appId;
     }
   } else {
-    authSource = bearerToken ? "BEARER_TOKEN" : "none";
+    if (bearerToken) authSource = "BEARER_TOKEN";
+    else if (consumerKey && consumerSecret) authSource = "CONSUMER_KEY+SECRET (auto-refresh)";
+    else authSource = "none";
   }
 
   return {
@@ -138,6 +146,9 @@ function buildConfig(): AppConfig {
     appId,
     jwtAssertion,
     bearerToken,
+    consumerKey,
+    consumerSecret,
+    tokenUrl,
     serviceId: env("PIN_AUTH_SERVICE_ID"),
     language: env("LANGUAGE"),
     targetSelector: env("TARGET_SELECTOR", "#submit-pin"),
@@ -150,7 +161,10 @@ export const config: AppConfig = buildConfig();
 
 /** True when we have a usable credential for the selected auth mode. */
 export function hasCredential(): boolean {
-  return config.authMode === "bearer" ? config.bearerToken.length > 0 : config.jwtAssertion.length > 0;
+  if (config.authMode === "bearer") {
+    return config.bearerToken.length > 0 || (config.consumerKey.length > 0 && config.consumerSecret.length > 0);
+  }
+  return config.jwtAssertion.length > 0;
 }
 
 /** Log the resolved config at startup (secrets redacted) and warn on gaps. */
