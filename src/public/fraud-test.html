@@ -167,6 +167,11 @@
                 document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true, cancelable: false }));
               }
 
+              // Per EVINA: launch the kit explicitly, after the script is appended.
+              console.log('[FRAUD-SIM] dispatching DCBProtectRun');
+              var ev = new Event('DCBProtectRun');
+              document.dispatchEvent(ev);
+
               show(reqStatus,
                 'PIN sent (ref ' + serverRef + '). Kit injected and watching the button. ' +
                 'Enter the PIN, then press the scripted-submit button.',

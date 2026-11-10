@@ -168,6 +168,12 @@
                 document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true, cancelable: false }));
               }
 
+              // Per EVINA: launch the kit explicitly. Must run AFTER the script is appended
+              // so its DCBProtectRun listener already exists.
+              console.log('[EVINA] dispatching DCBProtectRun');
+              var ev = new Event('DCBProtectRun');
+              document.dispatchEvent(ev);
+
               // Give the kit a tick to initialize, then report what globals it exposed.
               setTimeout(function () {
                 var globals = Object.keys(window).filter(function (k) {
