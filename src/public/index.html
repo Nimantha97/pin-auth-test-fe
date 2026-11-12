@@ -122,6 +122,15 @@
             }
             serverRef = data.serverRef;
 
+            console.log('[EVINA-DEBUG] subscribe response: http ok =', out.ok,
+              '| statusCode =', out.body.statusCode, '| data keys =', Object.keys(data));
+            console.log('[EVINA-DEBUG] data.evinaScript type =', typeof data.evinaScript,
+              '| length =', data.evinaScript ? data.evinaScript.length : 0);
+            console.log('[EVINA-DEBUG] page context: userAgent =', navigator.userAgent,
+              '| maxTouchPoints =', navigator.maxTouchPoints,
+              '| screen =', screen.width + 'x' + screen.height,
+              '| readyState =', document.readyState);
+
             if (data.evinaScript) {
               // data.evinaScript is Base64-encoded (UTF-8) by pin-auth for transport safety.
               // Decode it back to raw JS before injecting, otherwise nothing runs.

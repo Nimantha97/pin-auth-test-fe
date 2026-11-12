@@ -152,6 +152,51 @@ async function postJson(url: string, payload: unknown, cid: string): Promise<Pin
     cid,
   );
 
+  // EVINA debug: response headers, shape of the body, and any evina-ish keys.
+  const respHeaders: Record<string, string> = {};
+  resp.headers.forEach((v, k) => { respHeaders[k] = v; });
+  log.debug("[EVINA-DEBUG] response headers", respHeaders, cid);
+
+  const evinaKeys: string[] = [];
+  const walk = (o: unknown, path: string): void => {
+    if (!o || typeof o !== "object") return;
+    for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+      const p = path ? path + "." + k : k;
+      if (/evina|dcb|protect|script|fraud|kit/i.test(k)) {
+        evinaKeys.push(p + " (" + (typeof v === "string" ? "string len=" + v.length : v === null ? "null" : typeof v) + ")");
+      }
+      walk(v, p);
+    }
+  };
+  walk(body, "");
+  log.info(
+    "[EVINA-DEBUG] response shape",
+    {
+      topLevelKeys: Object.keys(body),
+      dataKeys: data ? Object.keys(data) : null,
+      evinaRelatedKeys: evinaKeys,
+      evinaScriptValue: data ? (data["evinaScript"] === undefined ? "ABSENT" : data["evinaScript"] === null ? "null" : typeof data["evinaScript"] === "string" && data["evinaScript"] === "" ? "empty string" : "present") : "no data",
+    },
+    cid,
+  );
+
+  // If a non-JSON body is WSO2's <ns:binary> wrapper, decode it so the real error is readable.
+  const rawField = body["raw"];
+  if (typeof rawField === "string") {
+    const m = rawField.match(/<ns:binary[^>]*>([\s\S]*?)<\/ns:binary>/);
+    if (m && m[1]) {
+      try {
+        const decoded = Buffer.from(m[1].trim(), "base64").toString("utf8");
+        log.warn("[EVINA-DEBUG] decoded gateway error body", { snippet: decoded.replace(/<style[\s\S]*?<\/style>/g, "").slice(0, 500) }, cid);
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Without a script, dump the body (minus nothing sensitive) so we can see why.
+  if (!evinaScript) {
+    log.warn("[EVINA-DEBUG] NO evinaScript in response. Full body:", body, cid);
+  }
+
   // When EVINA returns a script (subscribe path), log a preview so it's visible
   // in the server terminal. Full script still goes to the browser verbatim.
   if (evinaScript) {

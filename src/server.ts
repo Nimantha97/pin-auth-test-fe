@@ -69,6 +69,19 @@ app.post("/api/subscribe", (req, res) => {
       return;
     }
 
+    // Debug: show exactly how the client IP / UA that EVINA will see was derived.
+    log.info("[EVINA-DEBUG] subscribe client context", {
+      chosenIp: clientIp(req),
+      xForwardedFor: req.headers["x-forwarded-for"] ?? null,
+      socketRemoteAddress: req.socket.remoteAddress ?? null,
+      isLoopback: /^(127\.|::1$)/.test(clientIp(req)),
+      userAgent: req.headers["user-agent"] ?? null,
+      referer: req.headers["referer"] ?? null,
+      acceptLanguage: req.headers["accept-language"] ?? null,
+      serviceId: config.serviceId || "(app default)",
+      authMode: config.authMode,
+    });
+
     const result = await subscribe(msisdn, {
       ip: clientIp(req),
       userAgent: req.headers["user-agent"],
